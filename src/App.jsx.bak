@@ -65,8 +65,6 @@ import {
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import i18n from './i18n';
-import * as Y from 'yjs';
-import { WebsocketProvider } from 'y-websocket';
 
 const DEFAULT_VIEW = { x: 0, y: 0, zoom: 1 };
 const t = i18n.t.bind(i18n);
@@ -4736,20 +4734,6 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
 };
 
 function TapnowApp() {
-    // --- V3.8.8-Multiplayer: Yjs Real-time Collaboration Engine ---
-    const ydoc = useMemo(() => new Y.Doc(), []);
-    const provider = useMemo(() => {
-        try {
-            return new WebsocketProvider('ws://localhost:1234', 'tapnow-studio', ydoc);
-        } catch (e) {
-            console.error('[Yjs] Provider init failed:', e);
-            return null;
-        }
-    }, [ydoc]);
-    const ynodes = useMemo(() => ydoc.getArray('nodes'), [ydoc]);
-    const yconnections = useMemo(() => ydoc.getArray('connections'), [ydoc]);
-    const { awareness } = provider || {};
-
     const [theme, setTheme] = useState(() => {
         try {
             return localStorage.getItem('tapnow_theme') || 'dark';
@@ -4959,7 +4943,6 @@ function TapnowApp() {
         loadAutoSave();
         return () => { cancelled = true; };
     }, []);
- 
 
     // === V3.4.7: Undo/Redo 功能 (可配置步数) ===
     const [maxUndoSteps, setMaxUndoSteps] = useState(() => {
@@ -5324,96 +5307,6 @@ function TapnowApp() {
     }, [undo, redo]);
     // === End Undo/Redo ===
     const [view, setView] = useState(() => ({ ...DEFAULT_VIEW }));
-
-    // --- V3.8.8-Multiplayer: Real-time Awareness (Cursors) ---
-    const [others, setOthers] = useState([]);
-    const localUserRef = useRef({
-        name: `Collaborator-${ydoc.clientID.toString().slice(-4)}`,
-        color: `#${Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0')}`
-    });
-
-    useEffect(() => {
-        if (!awareness) return;
-
-        // Initial setup
-        awareness.setLocalStateField('user', {
-            ...localUserRef.current,
-            pos: { x: 0, y: 0 }
-        });
-
-        const handleMouseMove = (e) => {
-            const canvasBg = document.getElementById('canvas-bg');
-            if (!canvasBg) return;
-            const rect = canvasBg.getBoundingClientRect();
-            // Calculate world coordinates
-            const x = (e.clientX - rect.left - (view?.x || 0)) / (view?.zoom || 1);
-            const y = (e.clientY - rect.top - (view?.y || 0)) / (view?.zoom || 1);
-            
-            awareness.setLocalStateField('user', {
-                ...localUserRef.current,
-                pos: { x, y }
-            });
-        };
-
-        const handleAwarenessUpdate = () => {
-            const states = Array.from(awareness.getStates().entries())
-                .filter(([id]) => id !== ydoc.clientID)
-                .map(([id, state]) => ({
-                    id,
-                    name: state.user?.name,
-                    color: state.user?.color,
-                    x: state.user?.pos?.x,
-                    y: state.user?.pos?.y
-                }))
-                .filter(u => u.x !== undefined);
-            setOthers(states);
-        };
-
-        window.addEventListener('mousemove', handleMouseMove);
-        awareness.on('change', handleAwarenessUpdate);
-        
-        return () => {
-            window.removeEventListener('mousemove', handleMouseMove);
-            awareness.off('change', handleAwarenessUpdate);
-        };
-    }, [awareness, view, ydoc]);
-
-    // --- V3.8.8-Multiplayer: Sync Nodes/Connections with Yjs Shared Array ---
-    useEffect(() => {
-        if (!ynodes || !yconnections) return;
-        const observer = (event) => {
-            if (event.transaction.origin === 'local') return;
-            const remoteNodes = ynodes.toArray();
-            const remoteConnections = yconnections.toArray();
-            if (remoteNodes.length > 0) setNodes(remoteNodes);
-            if (remoteConnections.length > 0) setConnections(remoteConnections);
-        };
-        ynodes.observe(observer);
-        yconnections.observe(observer);
-        return () => {
-            ynodes.unobserve(observer);
-            yconnections.unobserve(observer);
-        };
-    }, [ynodes, yconnections]);
-
-    // Local changes -> Yjs Sync with Debounce
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            ydoc.transact(() => {
-                const currentYNodes = ynodes.toArray();
-                const currentYConns = yconnections.toArray();
-                if (JSON.stringify(currentYNodes) !== JSON.stringify(nodes)) {
-                    ynodes.delete(0, ynodes.length);
-                    ynodes.push(nodes);
-                }
-                if (JSON.stringify(currentYConns) !== JSON.stringify(connections)) {
-                    yconnections.delete(0, yconnections.length);
-                    yconnections.push(connections);
-                }
-            }, 'local');
-        }, 500);
-        return () => clearTimeout(timer);
-    }, [nodes, connections, ydoc, ynodes, yconnections]);
     const normalizeViewState = (candidate) => {
         if (!candidate || typeof candidate !== 'object') return { ...DEFAULT_VIEW };
         const x = Number.isFinite(candidate.x) ? candidate.x : DEFAULT_VIEW.x;
@@ -35481,63 +35374,6 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     visibleNodes={visibleNodes}
                                 />
                                 {visibleNodes.map((node) => renderNode(node))}
-
-                                {/* Multiplayer Cursors (Premium Aesthetics) */}
-                                {others.map((remoteUser) => {
-                                    if (remoteUser.x === undefined || remoteUser.y === undefined) return null;
-                                    const userColor = remoteUser.color || '#3b82f6';
-                                    return (
-                                        <div
-                                            key={remoteUser.id}
-                                            style={{
-                                                position: 'absolute',
-                                                left: remoteUser.x,
-                                                top: remoteUser.y,
-                                                pointerEvents: 'none',
-                                                zIndex: 9999,
-                                                display: 'flex',
-                                                flexDirection: 'column',
-                                                alignItems: 'flex-start',
-                                                gap: '4px',
-                                                transition: 'all 0.15s cubic-bezier(0.16, 1, 0.3, 1)' // Sleek motion
-                                            }}
-                                        >
-                                            {/* Modern Sharp Cursor */}
-                                            <svg 
-                                                width="20" height="20" viewBox="0 0 24 24" fill="none" 
-                                                style={{ 
-                                                    filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.4))',
-                                                    transform: 'rotate(-10deg)' 
-                                                }}
-                                            >
-                                                <path 
-                                                    d="M5.65376 12.3673H5.46026L5.31717 12.4976L0.500001 16.8829L0.500001 1.19841L11.7841 12.3673H5.65376Z" 
-                                                    fill={userColor} 
-                                                    stroke="white" 
-                                                    strokeWidth="1.5"
-                                                />
-                                            </svg>
-                                            
-                                            {/* Glassmorphism Name Tag */}
-                                            <div style={{
-                                                backgroundColor: `${userColor}cc`, // Semi-transparent
-                                                backdropFilter: 'blur(4px)',
-                                                color: 'white',
-                                                padding: '3px 8px',
-                                                borderRadius: '6px',
-                                                fontSize: '11px',
-                                                fontWeight: '600',
-                                                letterSpacing: '0.02em',
-                                                whiteSpace: 'nowrap',
-                                                boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-                                                border: '1px solid rgba(255,255,255,0.2)',
-                                                marginLeft: '12px'
-                                            }}>
-                                                {remoteUser.name || `User ${remoteUser.id}`}
-                                            </div>
-                                        </div>
-                                    );
-                                })}
                             </div>
 
                             {/* 框选框 */}
