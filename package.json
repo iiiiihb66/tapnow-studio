@@ -4,7 +4,7 @@
   "version": "3.8.8-rc8",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --port 5199 --host",
     "build": "vite build && node scripts/copy-versioned-build.cjs",
     "preview": "vite preview",
     "test:k87": "node scripts/k87_feature_tests.cjs",

@@ -1814,7 +1814,7 @@ const DEFAULT_PROVIDERS = {
     'midjourney': { key: '', url: 'https://api.midjourney.com', apiType: 'openai', useProxy: false, forceAsync: false },
     'jimeng': { key: '', url: JIMENG_API_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
     'grok': { key: '', url: 'https://ai.t8star.cn', apiType: 'openai', useProxy: false, forceAsync: false },
-    'yunwu': { key: '', url: 'https://yunwu.ai', apiType: 'gemini', useProxy: false, forceAsync: false },
+    'ollama': { key: 'ollama', url: 'https://ollama.com/v1', apiType: 'openai', useProxy: false, forceAsync: false },
 };
 
 // V3.6.0: 模型配置（简化版 - id 即 modelName，无 displayName）
@@ -1825,6 +1825,12 @@ const DEFAULT_API_CONFIGS = [
     { id: 'gpt-4o', provider: 'openai', type: 'Chat' },
     { id: 'deepseek-v3-1-250821', provider: 'deepseek', type: 'Chat' },
     { id: 'gemini-3-pro-preview', provider: 'google', type: 'Chat' },
+    { id: 'gemma3', provider: 'ollama', type: 'Chat' },
+    { id: 'llama3', provider: 'ollama', type: 'Chat' },
+    { id: 'mistral', provider: 'ollama', type: 'Chat' },
+    { id: 'glm-4.7', provider: 'ollama', type: 'Chat' },
+    { id: 'qwen3-vl:235b-instruct', provider: 'ollama', type: 'Chat' },
+    { id: 'gpt-oss:120b', provider: 'ollama', type: 'Chat' },
 
     // Image Models
     { id: 'MJ V6', provider: 'midjourney', type: 'Image' },
@@ -4735,12 +4741,43 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
     );
 };
 
+// V3.8.8: 登录界面组件
+const LoginOverlay = ({ t, pass, setPass, onLogin }) => {
+    return (
+        <div className="login-backdrop">
+            <div className="login-card">
+                <div className="login-icon-box">
+                    <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                    </svg>
+                </div>
+                <h2 className="text-2xl font-bold text-white mb-2">{t('Tapnow Studio')}</h2>
+                <p className="text-zinc-400 text-sm mb-6">{t('请输入访问令牌进入创作空间')}</p>
+                <input
+                    type="password"
+                    className="login-input"
+                    placeholder={t('访问令牌')}
+                    value={pass}
+                    onChange={(e) => setPass(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && onLogin(pass)}
+                    autoFocus
+                />
+                <button className="login-button" onClick={() => onLogin(pass)}>
+                    {t('验证并进入')}
+                </button>
+                <p className="text-zinc-500 text-xs mt-6 opacity-50">v3.8.8 · Real-time AI Node Canvas</p>
+            </div>
+        </div>
+    );
+};
+
 function TapnowApp() {
+
     // --- V3.8.8-Multiplayer: Yjs Real-time Collaboration Engine ---
     const ydoc = useMemo(() => new Y.Doc(), []);
     const provider = useMemo(() => {
         try {
-            return new WebsocketProvider('ws://localhost:1234', 'tapnow-studio', ydoc);
+            return new WebsocketProvider('ws://' + window.location.hostname + ':1235', 'tapnow-studio', ydoc);
         } catch (e) {
             console.error('[Yjs] Provider init failed:', e);
             return null;
@@ -5824,7 +5861,20 @@ function TapnowApp() {
 
     // V2.6.1 Feature: 本地服务器 URL
     const [localServerUrl, setLocalServerUrl] = useState(() => {
-        return localStorage.getItem('tapnow_local_server_url') || 'http://127.0.0.1:9527';
+        let saved = localStorage.getItem('tapnow_local_server_url');
+        
+        // --- V3.8.8 环境自动修正逻辑 ---
+        // 如果当前是局域网访问，且保存的地址是 localhost:9527（旧默认值），则自动升级到当前主机的 1235 端口
+        if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1' && window.location.hostname.match(/^\d+\.\d+\.\d+\.\d+$/)) {
+            if (!saved || saved.includes('127.0.0.1') || saved.includes('localhost') || saved.includes(':9527')) {
+                const autoDetected = `http://${window.location.hostname}:1235`;
+                console.log('[Env] LAN access detected. Upgrading local server URL:', autoDetected);
+                return autoDetected;
+            }
+        }
+        
+        if (saved) return saved;
+        return 'http://127.0.0.1:1235'; // 默认切到 1235 以配合协作服务器代理
     });
 
     // V2.6.1 Feature: 本地缓存服务器状态
@@ -5972,6 +6022,30 @@ function TapnowApp() {
             setAssetBundleActive(false);
         }
     }, []);
+    // V3.8.8: 登录授权状态
+    const [studioToken, setStudioToken] = useState(() => localStorage.getItem('tapnow_studio_token') || 'tapnow666');
+    const [isAuthorized, setIsAuthorized] = useState(() => {
+        const savedAuth = localStorage.getItem('tapnow_is_authorized');
+        // V3.8.8: 安全升级，所有环境默认均需输入令牌进入（默认 tapnow666）
+        return savedAuth === 'true';
+    });
+
+    const handleLogin = (inputPassword) => {
+        if (inputPassword === studioToken) {
+            setIsAuthorized(true);
+            localStorage.setItem('tapnow_is_authorized', 'true');
+            showToast(t('登录成功'), 'success');
+        } else {
+            showToast(t('访问令牌错误'), 'error');
+        }
+    };
+
+    const handleUpdateToken = (newToken) => {
+        setStudioToken(newToken);
+        localStorage.setItem('tapnow_studio_token', newToken);
+        showToast(t('访问令牌已更新'), 'success');
+    };
+
     const persistAssetBundleMeta = useCallback(() => {
         const idToOriginal = Object.fromEntries(assetBundleIdToOriginalRef.current);
         const pathToOriginal = Object.fromEntries(assetBundlePathToOriginalRef.current);
@@ -9290,10 +9364,10 @@ function TapnowApp() {
         };
     }, [getApiConfigByKey, providers, globalApiKey]);
 
-    const buildProxyUrl = useCallback((targetUrl, providerKey) => {
+    const buildProxyUrl = useCallback((targetUrl, providerKey, options = {}) => {
         if (!targetUrl) return targetUrl;
         const provider = providers[providerKey];
-        if (!provider?.useProxy) return targetUrl;
+        if (!provider?.useProxy && !options.force) return targetUrl;
         const base = (localServerUrl || '').trim().replace(/\/+$/, '');
         if (!base) return targetUrl;
         return `${base}/proxy?url=${encodeURIComponent(targetUrl)}`;
@@ -20633,6 +20707,8 @@ function TapnowApp() {
                                     ? { w: 320, h: 260 }
                                     : type === 'text-node'
                                         ? { w: 280, h: 200 }
+                                        : type === 'ai-chat'
+                                            ? { w: 400, h: 500 }
                                         : type === 'novel-input'
                                             ? { w: 400, h: 500 }
                                             : type === 'extract-characters-scenes'
@@ -20727,6 +20803,14 @@ function TapnowApp() {
                                                             ? { model: resolveModelKey(lastUsedImageModel), ratio: lastUsedRatio || '16:9', resolution: lastUsedImageResolution, prompt: '', referenceImages: [], chatModel: resolveModelKey(lastUsedExtractModel || ''), imageUrls: [], selectedImageIndex: null, isGenerating: false, progress: 0, error: null }
                                                             : type === 'local-save'
                                                                 ? { serverUrl: localServerUrl, savePath: '', subfolder: '', autoSave: false, serverStatus: localCacheServerConnected ? 'connected' : 'disconnected', lastSaved: null, savedFiles: [], lastSavedUrls: [] }
+                                         : type === 'ai-chat'
+                                            ? {
+                                                model: resolveModelKey(lastUsedExtractModel || apiConfigs.find(c => isChatModelType(c.type))?.id || ''),
+                                                prompt: '',
+                                                response: '',
+                                                isGenerating: false,
+                                                error: null
+                                            }
                                 : {},
         };
         setNodes(prev => [...prev, newNode]);
@@ -20936,6 +21020,86 @@ function TapnowApp() {
             showToast(`处理失败: ${err.message || '未知错误'}`, 'error', 4000);
         } finally {
             updateNodeSettings(nodeId, { isEnhancing: false });
+        }
+    };
+
+    const handleAIChatGenerate = async (nodeId) => {
+        const node = nodesMap.get(nodeId);
+        if (!node || node.type !== 'ai-chat') return;
+
+        const modelId = resolveModelKey(node.settings?.model || 'gemma3');
+        const credentials = getApiCredentials(modelId);
+        const prompt = (node.settings?.prompt || '').trim();
+
+        if (!prompt) {
+            showToast(t('请输入对话内容'), 'warning', 3000);
+            return;
+        }
+
+        updateNodeSettings(nodeId, { isGenerating: true, error: null });
+
+        try {
+            const config = getApiConfigByKey(modelId);
+            const baseUrl = (credentials.url || DEFAULT_BASE_URL).replace(/\/+$/, '');
+            const modelName = config?.modelName || modelId;
+            const targetUrl = `${baseUrl}/v1/chat/completions`;
+            
+            const payload = {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${credentials.key}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: modelName,
+                    messages: [{ role: 'user', content: prompt }],
+                    temperature: 0.7
+                })
+            };
+
+            let response;
+            try {
+                // 1. 优先尝试直连
+                response = await fetch(targetUrl, payload);
+            } catch (fetchErr) {
+                // 2. 如果直连报 TypeError (通常是 Failed to fetch / CORS)，则自动尝试走代理
+                if (fetchErr instanceof TypeError) {
+                    console.warn('[AI Chat] Direct fetch failed, trying proxy fallback...', fetchErr);
+                    const proxyUrl = buildProxyUrl(targetUrl, credentials.provider, { force: true });
+                    // V3.8.8: 注入 Studio 访问令牌通过代理验证
+                    const proxyPayload = {
+                        ...payload,
+                        headers: {
+                            ...payload.headers,
+                            'X-Studio-Token': studioToken
+                        }
+                    };
+                    response = await fetch(proxyUrl, proxyPayload);
+                } else {
+                    throw fetchErr;
+                }
+            }
+
+            if (!response.ok) {
+                const errData = await response.json().catch(() => ({}));
+                throw new Error(errData?.error?.message || `API Error: ${response.status}`);
+            }
+
+            const data = await response.json();
+            const content = data.choices?.[0]?.message?.content || '';
+            updateNodeSettings(nodeId, { response: content });
+        } catch (err) {
+            console.error('[AI Chat] Failed:', err);
+            
+            let errorMessage = err.message;
+            if (err instanceof TypeError && err.message === 'Failed to fetch') {
+                errorMessage = '网络连接失败 (Failed to fetch)。可能是由于：\n1. 请检查您的 API 地址是否正确\n2. 请确保后端服务 multiplayer-server.cjs 已启动\n3. 如果是本地 Ollama，请确保已设置 CORS 允许跨域';
+            }
+            
+            updateNodeSettings(nodeId, { error: errorMessage });
+            showToast(`生成失败: ${errorMessage.split('\n')[0]}`, 'error', 5000);
+        } finally {
+            updateNodeSettings(nodeId, { isGenerating: false });
         }
     };
 
@@ -23030,7 +23194,7 @@ function TapnowApp() {
         }
 
         // 2. 获取模型配置
-        const modelId = resolveModelKey(modelOverride || node?.settings?.model || '');
+        const modelId = resolveModelKey(modelOverride || node?.settings?.model || 'glm-4.7');
         if (!modelId) {
             showToast('请先选择分析模型', 'error');
             return;
@@ -23087,22 +23251,46 @@ ${inputText.substring(0, 15000)} ... (截断)
 
         try {
             const baseUrl = (credentials.url || DEFAULT_BASE_URL).replace(/\/+$/, '');
-
-            const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+            const targetUrl = `${baseUrl}/v1/chat/completions`;
+            const payload = {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${apiKey}`,
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    model: config.modelName || config.id || 'gemini-1.5-pro-latest',
+                    model: config.modelName || config.id || modelId,
                     messages: [
-                        { role: 'system', content: 'You are a helpful assistant that analyzes novels.' },
+                        { role: 'system', content: '你是一个精通小说拆解和角色建模的专家。' },
                         { role: 'user', content: prompt }
                     ],
-                    temperature: 0.7
+                    temperature: 0.1,
+                    response_format: { type: "json_object" }
                 })
-            });
+            };
+
+            let response;
+            try {
+                // 1. 优先尝试直连
+                response = await fetch(targetUrl, payload);
+            } catch (fetchErr) {
+                // 2. 如果直连报 TypeError (通常是 Failed to fetch / CORS)，则自动尝试走代理
+                if (fetchErr instanceof TypeError) {
+                    console.warn('[Extraction] Direct fetch failed, trying proxy fallback...', fetchErr);
+                    const proxyUrl = buildProxyUrl(targetUrl, credentials.provider, { force: true });
+                    // V3.8.8: 注入 Studio 访问令牌通过代理验证
+                    const proxyPayload = {
+                        ...payload,
+                        headers: {
+                            ...payload.headers,
+                            'X-Studio-Token': studioToken
+                        }
+                    };
+                    response = await fetch(proxyUrl, proxyPayload);
+                } else {
+                    throw fetchErr;
+                }
+            }
 
             if (!response.ok) {
                 let detail = '';
@@ -28947,6 +29135,98 @@ ${inputText.substring(0, 15000)} ... (截断)
                         </div>
                     )}
 
+                    {node.type === 'ai-chat' && (
+                        <div
+                            className={`relative w-full h-full flex flex-col transition-colors pointer-events-auto ${theme === 'dark'
+                                ? 'bg-zinc-900/80'
+                                : theme === 'solarized'
+                                    ? 'bg-[#eee8d5]'
+                                    : 'bg-white'
+                                } border rounded-lg overflow-hidden shadow-lg`}
+                        >
+                            <div className="flex items-center justify-between px-3 py-2 border-b text-xs font-semibold bg-zinc-500/5">
+                                <div className="flex items-center gap-1.5">
+                                    <MessageSquare size={13} className="text-blue-500" />
+                                    <span>{t('AI 对话')}</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <select
+                                        value={node.settings?.model || ''}
+                                        onChange={(e) => {
+                                            const modelKey = e.target.value;
+                                            updateNodeSettings(node.id, { model: modelKey });
+                                            // 同时也更新最后使用的模型记录，方便下次创建
+                                            setLastUsedExtractModel(modelKey);
+                                        }}
+                                        className={`text-[10px] px-1 py-0.5 rounded border outline-none ${theme === 'dark' ? 'bg-zinc-800 border-zinc-700 text-zinc-300' : 'bg-white border-zinc-300'}`}
+                                        onMouseDown={(e) => e.stopPropagation()}
+                                    >
+                                        <option value="">{t('选择模型...')}</option>
+                                        {apiConfigs
+                                            .filter(c => isChatModelType(c.type))
+                                            .map(config => {
+                                                const modelKey = config._uid || config.id;
+                                                const label = getModelLabelWithProvider(modelKey);
+                                                return (
+                                                    <option key={modelKey} value={modelKey}>
+                                                        {label}
+                                                    </option>
+                                                );
+                                            })
+                                        }
+                                    </select>
+                                </div>
+                            </div>
+                            
+                            <div className="flex-1 flex flex-col p-3 gap-3 overflow-hidden">
+                                <div className={`flex-1 overflow-y-auto min-h-0 rounded p-2 text-sm ${theme === 'dark' ? 'bg-black/20 text-zinc-300' : 'bg-black/5 text-zinc-800'}`}>
+                                    {node.settings?.response ? (
+                                        <div className="whitespace-pre-wrap">{node.settings.response}</div>
+                                    ) : (
+                                        <div className="text-zinc-500 italic text-xs">{t('等待生成...')}</div>
+                                    )}
+                                    {node.settings?.error && (
+                                        <div className="text-red-500 text-xs mt-2 p-1 bg-red-500/10 rounded border border-red-500/20">{node.settings.error}</div>
+                                    )}
+                                </div>
+                                
+                                <div className="flex flex-col gap-2">
+                                    <textarea
+                                        value={node.settings?.prompt || ''}
+                                        onChange={(e) => updateNodeSettings(node.id, { prompt: e.target.value })}
+                                        placeholder={t('输入指令，按住 Cmd+Enter 生成...')}
+                                        className={`w-full h-20 resize-none outline-none text-sm p-2 rounded border focus:border-blue-500 transition-colors ${theme === 'dark'
+                                            ? 'bg-zinc-800 border-zinc-700 text-zinc-200 placeholder-zinc-500'
+                                            : 'bg-white border-zinc-300 text-zinc-800 placeholder-zinc-400'
+                                            }`}
+                                        onMouseDown={(e) => e.stopPropagation()}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                                                handleAIChatGenerate(node.id);
+                                            }
+                                        }}
+                                    />
+                                    <button
+                                        onClick={() => handleAIChatGenerate(node.id)}
+                                        disabled={node.settings?.isGenerating}
+                                        className={`flex items-center justify-center gap-1.5 py-1.5 rounded text-xs font-medium transition-all ${
+                                            node.settings?.isGenerating
+                                                ? 'bg-zinc-500 text-white cursor-not-allowed opacity-70'
+                                                : 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm hover:shadow shadow-blue-500/20'
+                                        }`}
+                                    >
+                                        {node.settings?.isGenerating ? (
+                                            <Loader2 size={13} className="animate-spin" />
+                                        ) : (
+                                            <Send size={13} />
+                                        )}
+                                        {node.settings?.isGenerating ? t('生成中...') : t('发送指令')}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {node.type === 'video-analyze' && (
                         <div
                             className={`relative w-full h-full flex flex-col transition-colors pointer-events-auto video-analyze-container ${theme === 'dark' ? 'bg-zinc-900/80' : theme === 'solarized' ? 'bg-[#fdf6e3]' : 'bg-zinc-100'}`}
@@ -33875,7 +34155,14 @@ ${inputText.substring(0, 15000)} ... (截断)
     // 交互模式：正在拖拽或缩放时启用
     const isInteracting = isDragging || isPanning;
 
+    const [loginInput, setLoginInput] = useState('');
+
+    if (!isAuthorized) {
+        return <LoginOverlay t={t} pass={loginInput} setPass={setLoginInput} onLogin={handleLogin} />;
+    }
+
     return (
+
         <>
             {/* 极简艺术进度条 */}
             <ArtisticProgress
@@ -35499,6 +35786,8 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                 flexDirection: 'column',
                                                 alignItems: 'flex-start',
                                                 gap: '4px',
+                                                transform: `scale(${1 / (view?.zoom || 1)})`,
+                                                transformOrigin: '0 0',
                                                 transition: 'all 0.15s cubic-bezier(0.16, 1, 0.3, 1)' // Sleek motion
                                             }}
                                         >
@@ -36018,6 +36307,7 @@ ${inputText.substring(0, 15000)} ... (截断)
                                     {[
                                         { type: 'input-image', label: t('图片输入') },
                                         { type: 'text-node', label: t('文字节点') },
+                                        { type: 'ai-chat', label: t('AI 对话') },
                                         { type: 'novel-input', label: t('小说输入') },
                                         {
                                             type: 'extract-characters-scenes',
@@ -36825,7 +37115,31 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                             </div>
                                                         </div>
                                                         <p className="text-[9px] text-zinc-500 mt-1">{t('用于连接本地后端服务，支持大文件保存和处理。')}</p>
+
+                                                        <div className="mt-3 pt-3 border-t border-zinc-700/30">
+                                                            <span className={`text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>{t('Studio 访问令牌')}</span>
+                                                            <div className="flex items-center gap-2 mt-1">
+                                                                <input
+                                                                    type="text"
+                                                                    value={studioToken}
+                                                                    onChange={(e) => handleUpdateToken(e.target.value)}
+                                                                    className={`flex-1 text-xs rounded px-2 py-1 border outline-none ${theme === 'dark' ? 'bg-zinc-800 border-zinc-700 text-zinc-300' : 'bg-white border-zinc-300'}`}
+                                                                />
+                                                                <button
+                                                                    onClick={() => {
+                                                                        setIsAuthorized(false);
+                                                                        localStorage.removeItem('tapnow_is_authorized');
+                                                                        setSettingsOpen(false);
+                                                                    }}
+                                                                    className="px-2 py-1 text-[10px] bg-red-600/20 text-red-500 hover:bg-red-600/30 rounded border border-red-900/50"
+                                                                >
+                                                                    {t('登出')}
+                                                                </button>
+                                                            </div>
+                                                            <p className="text-[9px] text-zinc-500 mt-1">{t('修改此令牌将立即同步到本地安全验证。')}</p>
+                                                        </div>
                                                     </div>
+
                                                 </div>
                                             </div>
 
