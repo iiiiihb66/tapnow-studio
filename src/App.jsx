@@ -1815,6 +1815,7 @@ const DEFAULT_PROVIDERS = {
     'midjourney': { key: '', url: 'https://api.midjourney.com', apiType: 'openai', useProxy: false, forceAsync: false },
     'jimeng': { key: '', url: JIMENG_API_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
     'grok': { key: '', url: 'https://ai.t8star.cn', apiType: 'openai', useProxy: false, forceAsync: false },
+    'runninghub': { key: '', url: 'http://localhost:3001', apiType: 'runninghub', useProxy: false, forceAsync: true },
 };
 
 // V3.6.0: 模型配置（简化版 - id 即 modelName，无 displayName）
@@ -1827,6 +1828,7 @@ const DEFAULT_API_CONFIGS = [
     { id: 'gemini-3-pro-preview', provider: 'google', type: 'Chat' },
 
     // Image Models
+    { id: 'runninghub-image', provider: 'runninghub', type: 'Image' },
     { id: 'MJ V6', provider: 'midjourney', type: 'Image' },
     { id: 'gpt-4o-image', provider: 'openai', type: 'Image' },
     { id: 'gemini-3-pro-image-preview', provider: 'yunwu', type: 'Image' },
@@ -1841,6 +1843,7 @@ const DEFAULT_API_CONFIGS = [
     { id: 'nanobanana', provider: 'jimeng', type: 'Image' },
 
     // Video Models
+    { id: 'runninghub-video', provider: 'runninghub', type: 'Video', durations: ['5s', '10s'] },
     { id: 'sora-2', provider: 'openai', type: 'Video', durations: ['5s', '10s'] },
     { id: 'sora-2-pro', provider: 'openai', type: 'Video', durations: ['15s', '25s'] },
     { id: 'jimeng-video-3.5-pro', provider: 'jimeng', type: 'Video', durations: ['5s', '10s'] },
@@ -15998,6 +16001,46 @@ function TapnowApp() {
             });
     };
 
+    // RunningHub任务轮询函数
+    const pollRunningHubTask = (taskId, localTaskId, baseUrl, w, h, sourceNodeId, attempt = 0) => {
+        if (attempt > 60) {
+            setHistory((prev) => prev.map((hItem) => hItem.id === taskId ? { ...hItem, status: 'failed', progress: 0, errorMsg: '任务超时' } : hItem));
+            return;
+        }
+
+        let pollEndpoint = `${baseUrl.replace(/\/+$/, '')}/api/runninghub/tasks/${localTaskId}`;
+        if (pollEndpoint.startsWith('http://localhost:3001')) {
+            pollEndpoint = pollEndpoint.replace('http://localhost:3001', '');
+        }
+
+        setTimeout(async () => {
+            try {
+                const resp = await fetch(pollEndpoint);
+                if (!resp.ok) throw new Error('Polling request failed');
+                const data = await resp.json();
+                
+                if (data.error) throw new Error(data.error);
+                
+                const task = data.task;
+                if (!task) throw new Error('No task returned');
+
+                if (task.status === 'SUCCESS' && task.resultFiles && task.resultFiles.length > 0) {
+                    const finalUrl = task.resultFiles[0];
+                    setHistory((prev) => prev.map((hItem) => hItem.id === taskId ? { ...hItem, status: 'success', progress: 100, url: finalUrl, width: w, height: h } : hItem));
+                    handleTaskSuccess(taskId, finalUrl, w, h, sourceNodeId);
+                } else if (task.status === 'FAILED') {
+                    setHistory((prev) => prev.map((hItem) => hItem.id === taskId ? { ...hItem, status: 'failed', progress: 0, errorMsg: task.errorMessage || '生成失败' } : hItem));
+                } else {
+                    setHistory((prev) => prev.map((hItem) => hItem.id === taskId ? { ...hItem, progress: Math.min(95, 10 + attempt * 2) } : hItem));
+                    pollRunningHubTask(taskId, localTaskId, baseUrl, w, h, sourceNodeId, attempt + 1);
+                }
+            } catch (error) {
+                console.warn('[RunningHub Polling Error]', error);
+                pollRunningHubTask(taskId, localTaskId, baseUrl, w, h, sourceNodeId, attempt + 1);
+            }
+        }, 5000);
+    };
+
     // Midjourney任务轮询函数
     const pollMidjourneyJob = (jobId, taskId, baseUrl, apiKey, mjMode = 'fast', w, h, attempt = 0) => {
         const maxAttempts = 120; // 最多轮询120次（约10分钟，假设每次5秒）
@@ -17347,6 +17390,26 @@ function TapnowApp() {
                         };
                     }
                 }
+                // 6.5 RunningHub API Integration
+                else if (providerLower === 'runninghub') {
+                    endpoint = `${baseUrl}/api/runninghub/tasks`;
+                    if (endpoint.startsWith('http://localhost:3001')) {
+                        endpoint = endpoint.replace('http://localhost:3001', '');
+                    }
+                    payload = {
+                        prompt: prompt || ''
+                    };
+                    if (connectedImages.length > 0) {
+                        try {
+                            const imgUrl = connectedImages[0];
+                            const base64 = await getBase64FromUrl(imgUrl, { useProxy: resolveSourceProxy(imgUrl) });
+                            payload.imageBase64 = `data:image/png;base64,${base64}`;
+                            payload.imageFilename = 'input.png';
+                        } catch (e) {
+                            throw new Error(`图片加载失败: ${e.message}`);
+                        }
+                    }
+                }
                 // 7. [修复] 通用兜底 (修复 Banana T2I 问题)
                 // 这部分是 V2.5-4 缺失的，导致普通 Banana 模型和其他通用 OpenAI 格式模型无法进行文生图
                 else {
@@ -17806,6 +17869,14 @@ function TapnowApp() {
                 }
 
                 const immediateImageCandidates = collectImmediateImageUrls(data);
+
+                if (providerLower === 'runninghub' && data?.task?.id) {
+                    setHistory((prev) => prev.map((hItem) =>
+                        hItem.id === taskId ? { ...hItem, status: 'generating', progress: 10, remoteTaskId: data.task.id } : hItem
+                    ));
+                    pollRunningHubTask(taskId, data.task.id, baseUrl, w, h, actualSourceNodeId, 0);
+                    return;
+                }
 
                 // [保留 V2.5-4 特性] 处理异步任务 (Nano Banana 2)
                 // 如果响应中包含 task_id，进入异步轮询模式

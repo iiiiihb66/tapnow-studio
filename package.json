@@ -12,7 +12,7 @@
     "test:storyboard-roundtrip": "node scripts/storyboard_save_load_roundtrip_regression.cjs",
     "test:smoke-playwright": "node scripts/smoke_playwright_fallback.cjs",
     "test:release:gates": "npm run test:k87 && npm run test:storyboard-parser && npm run test:storyboard-roundtrip",
-    "dev:full": "concurrently \"npm run dev\" \"node server/index.js\""
+    "dev:full": "concurrently \"npm run dev\" \"node server/index.js\" \"node multiplayer-server.cjs\""
   },
   "proxy": "http://localhost:3001",
   "dependencies": {
