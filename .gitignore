@@ -36,3 +36,9 @@ CLAUDE.md
 scan_i18n*.txt
 src/App.jsx.backup.*
 src_corrupted_*/
+
+# Server dev files
+.env
+.env.*
+server.log
+server.pid

@@ -62,6 +62,7 @@ import {
     Zap, // V3.5.24
     Ban, Clock, Edit3, Pencil // V3.7.24: API management buttons + V3.7.25: Edit icons
 } from 'lucide-react';
+import OllamaPanel from './components/ollama/OllamaPanel';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import i18n from './i18n';
@@ -1814,7 +1815,6 @@ const DEFAULT_PROVIDERS = {
     'midjourney': { key: '', url: 'https://api.midjourney.com', apiType: 'openai', useProxy: false, forceAsync: false },
     'jimeng': { key: '', url: JIMENG_API_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
     'grok': { key: '', url: 'https://ai.t8star.cn', apiType: 'openai', useProxy: false, forceAsync: false },
-    'ollama': { key: 'ollama', url: 'https://ollama.com/v1', apiType: 'openai', useProxy: false, forceAsync: false },
 };
 
 // V3.6.0: 模型配置（简化版 - id 即 modelName，无 displayName）
@@ -1825,12 +1825,6 @@ const DEFAULT_API_CONFIGS = [
     { id: 'gpt-4o', provider: 'openai', type: 'Chat' },
     { id: 'deepseek-v3-1-250821', provider: 'deepseek', type: 'Chat' },
     { id: 'gemini-3-pro-preview', provider: 'google', type: 'Chat' },
-    { id: 'gemma3', provider: 'ollama', type: 'Chat' },
-    { id: 'llama3', provider: 'ollama', type: 'Chat' },
-    { id: 'mistral', provider: 'ollama', type: 'Chat' },
-    { id: 'glm-4.7', provider: 'ollama', type: 'Chat' },
-    { id: 'qwen3-vl:235b-instruct', provider: 'ollama', type: 'Chat' },
-    { id: 'gpt-oss:120b', provider: 'ollama', type: 'Chat' },
 
     // Image Models
     { id: 'MJ V6', provider: 'midjourney', type: 'Image' },
@@ -4741,35 +4735,6 @@ const Lightbox = ({ item, onClose, onNavigate, onShotNavigate, onHistoryNavigate
     );
 };
 
-// V3.8.8: 登录界面组件
-const LoginOverlay = ({ t, pass, setPass, onLogin }) => {
-    return (
-        <div className="login-backdrop">
-            <div className="login-card">
-                <div className="login-icon-box">
-                    <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                    </svg>
-                </div>
-                <h2 className="text-2xl font-bold text-white mb-2">{t('Tapnow Studio')}</h2>
-                <p className="text-zinc-400 text-sm mb-6">{t('请输入访问令牌进入创作空间')}</p>
-                <input
-                    type="password"
-                    className="login-input"
-                    placeholder={t('访问令牌')}
-                    value={pass}
-                    onChange={(e) => setPass(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && onLogin(pass)}
-                    autoFocus
-                />
-                <button className="login-button" onClick={() => onLogin(pass)}>
-                    {t('验证并进入')}
-                </button>
-                <p className="text-zinc-500 text-xs mt-6 opacity-50">v3.8.8 · Real-time AI Node Canvas</p>
-            </div>
-        </div>
-    );
-};
 
 function TapnowApp() {
 
@@ -4795,6 +4760,7 @@ function TapnowApp() {
         }
     });
     const [language, setLanguage] = useState('zh');
+    const [isOllamaOpen, setIsOllamaOpen] = useState(false);
 
     useEffect(() => {
         if (i18n.language !== language) {
@@ -6022,29 +5988,7 @@ function TapnowApp() {
             setAssetBundleActive(false);
         }
     }, []);
-    // V3.8.8: 登录授权状态
-    const [studioToken, setStudioToken] = useState(() => localStorage.getItem('tapnow_studio_token') || 'tapnow666');
-    const [isAuthorized, setIsAuthorized] = useState(() => {
-        const savedAuth = localStorage.getItem('tapnow_is_authorized');
-        // V3.8.8: 安全升级，所有环境默认均需输入令牌进入（默认 tapnow666）
-        return savedAuth === 'true';
-    });
 
-    const handleLogin = (inputPassword) => {
-        if (inputPassword === studioToken) {
-            setIsAuthorized(true);
-            localStorage.setItem('tapnow_is_authorized', 'true');
-            showToast(t('登录成功'), 'success');
-        } else {
-            showToast(t('访问令牌错误'), 'error');
-        }
-    };
-
-    const handleUpdateToken = (newToken) => {
-        setStudioToken(newToken);
-        localStorage.setItem('tapnow_studio_token', newToken);
-        showToast(t('访问令牌已更新'), 'success');
-    };
 
     const persistAssetBundleMeta = useCallback(() => {
         const idToOriginal = Object.fromEntries(assetBundleIdToOriginalRef.current);
@@ -13710,6 +13654,80 @@ function TapnowApp() {
         };
         input.click();
     }, [showToast]);
+
+    const syncModelsFromProvider = useCallback(async (providerKey) => {
+        const provider = providers[providerKey];
+        if (!provider) return;
+
+        // 获取该 Provider 下已有的模型名称，用于去重
+        const existingModelNames = new Set(
+            apiConfigs
+                .filter(c => c.provider === providerKey)
+                .map(c => c.modelName || c.id)
+        );
+
+        const apiKey = provider.key || globalApiKey;
+        let baseUrl = (provider.url || DEFAULT_BASE_URL).replace(/\/+$/, '');
+        
+        // 智能 URL 处理：兼容不同格式的 Base URL，防止出现 /v1/v1/models 导致的 404
+        let targetUrl = baseUrl;
+        if (!targetUrl.toLowerCase().includes('/models')) {
+            // 如果 URL 没以 /models 结尾，则尝试拼接
+            targetUrl = `${targetUrl}/v1/models`.replace(/\/v1\/v1\//g, '/v1/');
+        }
+
+        showToast(`正在从 ${providerKey} 同步模型列表...`, 'info', 2000);
+
+        try {
+            const response = await fetch(targetUrl, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+            const rawModels = Array.isArray(data) ? data : (Array.isArray(data.data) ? data.data : []);
+            
+            if (rawModels.length === 0) {
+                showToast('未发现新模型或接口返回格式不兼容', 'warning', 3000);
+                return;
+            }
+
+            const newModels = rawModels
+                .filter(m => {
+                    const mName = m.id || m.name || m.model;
+                    return mName && !existingModelNames.has(mName);
+                })
+                .map(m => {
+                    const mName = m.id || m.name || m.model;
+                    return {
+                        id: `${providerKey}-${mName}`,
+                        provider: providerKey,
+                        type: 'Chat',
+                        modelName: mName,
+                        displayName: mName,
+                        _uid: `uid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+                    };
+                });
+
+            if (newModels.length === 0) {
+                showToast('所有模型已存在，无需同步', 'success', 3000);
+                return;
+            }
+
+            setApiConfigs(prev => [...prev, ...newModels]);
+            showToast(`成功同步 ${newModels.length} 个新模型`, 'success', 3000);
+        } catch (err) {
+            console.error('[Sync Models] Failed:', err);
+            showToast(`同步失败: ${err.message}`, 'error', 5000);
+        }
+    }, [providers, globalApiKey, apiConfigs, showToast]);
     const importModelLibraryEntries = useCallback(() => {
         const input = document.createElement('input');
         input.type = 'file';
@@ -21042,7 +21060,12 @@ function TapnowApp() {
             const config = getApiConfigByKey(modelId);
             const baseUrl = (credentials.url || DEFAULT_BASE_URL).replace(/\/+$/, '');
             const modelName = config?.modelName || modelId;
-            const targetUrl = `${baseUrl}/v1/chat/completions`;
+            
+            // 智能 URL 拼接：如果用户填写的 URL 已经包含 chat/completions 或 api/chat，则不再追加
+            let targetUrl = baseUrl;
+            if (!targetUrl.includes('/chat/completions') && !targetUrl.includes('/api/chat')) {
+                targetUrl = `${targetUrl}/v1/chat/completions`;
+            }
             
             const payload = {
                 method: 'POST',
@@ -21062,19 +21085,11 @@ function TapnowApp() {
                 // 1. 优先尝试直连
                 response = await fetch(targetUrl, payload);
             } catch (fetchErr) {
-                // 2. 如果直连报 TypeError (通常是 Failed to fetch / CORS)，则自动尝试走代理
+                // 2. 如果直连报错，自动尝试走代理转发
                 if (fetchErr instanceof TypeError) {
                     console.warn('[AI Chat] Direct fetch failed, trying proxy fallback...', fetchErr);
                     const proxyUrl = buildProxyUrl(targetUrl, credentials.provider, { force: true });
-                    // V3.8.8: 注入 Studio 访问令牌通过代理验证
-                    const proxyPayload = {
-                        ...payload,
-                        headers: {
-                            ...payload.headers,
-                            'X-Studio-Token': studioToken
-                        }
-                    };
-                    response = await fetch(proxyUrl, proxyPayload);
+                    response = await fetch(proxyUrl, payload);
                 } else {
                     throw fetchErr;
                 }
@@ -21093,7 +21108,7 @@ function TapnowApp() {
             
             let errorMessage = err.message;
             if (err instanceof TypeError && err.message === 'Failed to fetch') {
-                errorMessage = '网络连接失败 (Failed to fetch)。可能是由于：\n1. 请检查您的 API 地址是否正确\n2. 请确保后端服务 multiplayer-server.cjs 已启动\n3. 如果是本地 Ollama，请确保已设置 CORS 允许跨域';
+                errorMessage = '连接 API 失败 (Failed to fetch)。请检查：\n1. API 地址及协议(http/https)是否填错\n2. 网络是否能访问该 API 端点\n3. 如果是本地服务，请开启代理或处理跨域限制';
             }
             
             updateNodeSettings(nodeId, { error: errorMessage });
@@ -23194,7 +23209,7 @@ function TapnowApp() {
         }
 
         // 2. 获取模型配置
-        const modelId = resolveModelKey(modelOverride || node?.settings?.model || 'glm-4.7');
+        const modelId = resolveModelKey(modelOverride || node?.settings?.model || '');
         if (!modelId) {
             showToast('请先选择分析模型', 'error');
             return;
@@ -23251,7 +23266,10 @@ ${inputText.substring(0, 15000)} ... (截断)
 
         try {
             const baseUrl = (credentials.url || DEFAULT_BASE_URL).replace(/\/+$/, '');
-            const targetUrl = `${baseUrl}/v1/chat/completions`;
+            let targetUrl = baseUrl;
+            if (!targetUrl.includes('/chat/completions') && !targetUrl.includes('/api/chat')) {
+                targetUrl = `${targetUrl}/v1/chat/completions`;
+            }
             const payload = {
                 method: 'POST',
                 headers: {
@@ -23274,19 +23292,11 @@ ${inputText.substring(0, 15000)} ... (截断)
                 // 1. 优先尝试直连
                 response = await fetch(targetUrl, payload);
             } catch (fetchErr) {
-                // 2. 如果直连报 TypeError (通常是 Failed to fetch / CORS)，则自动尝试走代理
+                // 2. 如果直连报错，自动尝试走代理转发
                 if (fetchErr instanceof TypeError) {
                     console.warn('[Extraction] Direct fetch failed, trying proxy fallback...', fetchErr);
                     const proxyUrl = buildProxyUrl(targetUrl, credentials.provider, { force: true });
-                    // V3.8.8: 注入 Studio 访问令牌通过代理验证
-                    const proxyPayload = {
-                        ...payload,
-                        headers: {
-                            ...payload.headers,
-                            'X-Studio-Token': studioToken
-                        }
-                    };
-                    response = await fetch(proxyUrl, proxyPayload);
+                    response = await fetch(proxyUrl, payload);
                 } else {
                     throw fetchErr;
                 }
@@ -23338,7 +23348,7 @@ ${inputText.substring(0, 15000)} ... (截断)
             console.error('Extraction Failed', error);
             let msg = error?.message || '提取失败';
             if (error?.name === 'TypeError' || /Failed to fetch|NetworkError/i.test(msg)) {
-                msg = '网络或跨域请求失败（CORS）。请检查 API 地址、协议（http/https）或开启浏览器 CORS 插件。';
+                msg = '网络连接失败或跨域限制（CORS）。请检查 API 地址配置或尝试通过内置代理转发。';
             }
             updateNodeSettings(nodeId, { errorMsg: msg });
             showToast(`提取失败: ${msg}`, 'error', 5000);
@@ -34155,12 +34165,6 @@ ${inputText.substring(0, 15000)} ... (截断)
     // 交互模式：正在拖拽或缩放时启用
     const isInteracting = isDragging || isPanning;
 
-    const [loginInput, setLoginInput] = useState('');
-
-    if (!isAuthorized) {
-        return <LoginOverlay t={t} pass={loginInput} setPass={setLoginInput} onLogin={handleLogin} />;
-    }
-
     return (
 
         <>
@@ -34466,6 +34470,19 @@ ${inputText.substring(0, 15000)} ... (截断)
                             title={t('AI 对话')}
                         >
                             <MessageSquare size={18} />
+                        </button>
+
+                        <button
+                            onClick={() => setIsOllamaOpen(!isOllamaOpen)}
+                            className={`p-2.5 rounded-lg transition-all mb-2 ${isOllamaOpen
+                                ? 'bg-purple-600 text-white'
+                                : theme === 'dark'
+                                    ? 'text-zinc-500 hover:text-zinc-300'
+                                    : 'text-zinc-500 hover:text-zinc-800'
+                                }`}
+                            title={t('AI 实验室 (Ollama)')}
+                        >
+                            <Bot size={18} />
                         </button>
                         {/* 功能5：保存和加载按钮 */}
                         <button
@@ -35842,6 +35859,24 @@ ${inputText.substring(0, 15000)} ... (截断)
                                 />
                             )}
                         </div>
+                        {/* Ollama AI Lab Panel */}
+                        <OllamaPanel 
+                            isOpen={isOllamaOpen}
+                            onClose={() => setIsOllamaOpen(false)}
+                            theme={theme}
+                            onAddToCanvas={(item) => {
+                                // 创建新节点并添加到画布
+                                const newNode = {
+                                    id: `node_${Date.now()}`,
+                                    type: item.type === 'image' ? 'image-node' : 'note-node',
+                                    x: (window.innerWidth / 2 - view.x) / view.zoom,
+                                    y: (window.innerHeight / 2 - view.y) / view.zoom,
+                                    settings: item.type === 'image' ? { url: item.url } : { content: item.content }
+                                };
+                                setNodes(prev => [...prev, newNode]);
+                                showToast('已添加到画布', 'success');
+                            }}
+                        />
 
                         {/* Chat Sidebar Panel */}
                         <div
@@ -37116,28 +37151,6 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         </div>
                                                         <p className="text-[9px] text-zinc-500 mt-1">{t('用于连接本地后端服务，支持大文件保存和处理。')}</p>
 
-                                                        <div className="mt-3 pt-3 border-t border-zinc-700/30">
-                                                            <span className={`text-xs ${theme === 'dark' ? 'text-zinc-300' : 'text-zinc-700'}`}>{t('Studio 访问令牌')}</span>
-                                                            <div className="flex items-center gap-2 mt-1">
-                                                                <input
-                                                                    type="text"
-                                                                    value={studioToken}
-                                                                    onChange={(e) => handleUpdateToken(e.target.value)}
-                                                                    className={`flex-1 text-xs rounded px-2 py-1 border outline-none ${theme === 'dark' ? 'bg-zinc-800 border-zinc-700 text-zinc-300' : 'bg-white border-zinc-300'}`}
-                                                                />
-                                                                <button
-                                                                    onClick={() => {
-                                                                        setIsAuthorized(false);
-                                                                        localStorage.removeItem('tapnow_is_authorized');
-                                                                        setSettingsOpen(false);
-                                                                    }}
-                                                                    className="px-2 py-1 text-[10px] bg-red-600/20 text-red-500 hover:bg-red-600/30 rounded border border-red-900/50"
-                                                                >
-                                                                    {t('登出')}
-                                                                </button>
-                                                            </div>
-                                                            <p className="text-[9px] text-zinc-500 mt-1">{t('修改此令牌将立即同步到本地安全验证。')}</p>
-                                                        </div>
                                                     </div>
 
                                                 </div>
@@ -37667,10 +37680,17 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                         <div className={`text-[10px] font-medium uppercase tracking-wider ${theme === 'dark' ? 'text-zinc-500' : 'text-zinc-600'}`}>{t('模型')}</div>
                                                         <div className="flex items-center gap-2">
                                                             <button
+                                                                onClick={() => syncModelsFromProvider(providerKey)}
+                                                                className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-1 ${theme === 'dark' ? 'bg-blue-600/20 text-blue-400 hover:bg-blue-600/30' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}
+                                                                title={t('从接口自动获取模型列表')}
+                                                            >
+                                                                <RefreshCw size={10} /> {t('同步模型')}
+                                                            </button>
+                                                            <button
                                                                 onClick={() => importApiModelConfigs(providerKey)}
                                                                 className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-1 ${theme === 'dark' ? 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700' : 'bg-zinc-200 text-zinc-600 hover:bg-zinc-300'}`}
                                                             >
-                                                                <UploadCloud size={10} /> {t('导入模型')}
+                                                                <UploadCloud size={10} /> {t('导入配置')}
                                                             </button>
                                                             <button
                                                                 onClick={() => {

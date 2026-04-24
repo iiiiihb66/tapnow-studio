@@ -10,5 +10,13 @@ export default defineConfig({
     minify: true,
     cssCodeSplit: false, // Ensure CSS is inlined
     assetsInlineLimit: 100000000, // Large limit to ensure assets are inlined
+  },
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3001',
+        changeOrigin: true
+      }
+    }
   }
 })

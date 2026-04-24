@@ -20,15 +20,6 @@ const server = http.createServer((req, res) => {
     const parsedTarget = url.parse(targetUrl);
     const protocol = parsedTarget.protocol === 'https:' ? https : http;
 
-    // V3.8.8: Security validation
-    const studioToken = process.env.STUDIO_TOKEN || 'tapnow666';
-    const clientToken = req.headers['x-studio-token'];
-
-    if (clientToken !== studioToken) {
-      console.warn(`[Proxy Security] Unauthorized access attempt from ${req.socket.remoteAddress}`);
-      res.writeHead(401);
-      return res.end('Unauthorized: Invalid Studio Token');
-    }
     
     // 过滤并保留关键 Header
     const headers = { ...req.headers };
