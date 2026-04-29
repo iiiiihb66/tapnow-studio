@@ -6,6 +6,32 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import fetch from 'node-fetch';
 import FormData from 'form-data';
+import sqliteStore from './sqlite-store.cjs';
+
+function migrateTasks() {
+  try {
+    const applied = sqliteStore.getKv('migration_json_tasks_v1');
+    if (applied) {
+      console.log('[Migration] JSON tasks migration already applied.');
+      return;
+    }
+    
+    if (!fs.existsSync(DB_PATH)) return;
+    const db = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+    if (db.tasks && db.tasks.length > 0) {
+      console.log(`[Migration] Migrating ${db.tasks.length} tasks to SQLite...`);
+      let count = 0;
+      for (const task of db.tasks) {
+        sqliteStore.upsertTask(task);
+        count++;
+      }
+      console.log(`[Migration] Successfully migrated ${count} tasks.`);
+    }
+    sqliteStore.setKv('migration_json_tasks_v1', true);
+  } catch (err) {
+    console.error('[Migration Error]:', err);
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,6 +72,8 @@ function loadEnvFiles() {
 
 loadEnvFiles();
 ensureDb();
+sqliteStore.initDb();
+migrateTasks();
 
 function ensureDb() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -342,36 +370,53 @@ async function syncTask(localTask) {
         localTask.completedAt = nowIso();
       }
     }
+    sqliteStore.updateTask(localTask.id, {
+      status: localTask.status,
+      output_url: localTask.resultFileUrl,
+      error: localTask.errorMessage,
+      raw_json: localTask
+    });
   } catch (error) {
     console.error(`[RunningHub Sync Error] taskId=${localTask.id}:`, error);
-    // Don't mark as failed immediately on network error, let it retry
   }
   
   return localTask;
 }
 function toClientTask(task) {
-  return {
+  if (!task) return null;
+  // 如果是从 SQLite 读出的行对象，进行字段映射
+  const isSqliteRow = 'remote_task_id' in task;
+  
+  const t = {
     id: task.id,
     type: task.type || 'workflow',
     model: task.model,
     workflowName: task.workflowName,
     workflowId: task.workflowId,
     status: task.status,
-    runninghubTaskId: task.runninghubTaskId,
+    runninghubTaskId: isSqliteRow ? task.remote_task_id : task.runninghubTaskId,
     prompt: task.prompt,
-    createdAt: task.createdAt,
-    updatedAt: task.updatedAt,
-    lastSyncedAt: task.lastSyncedAt,
-    completedAt: task.completedAt,
-    resultFiles: (task.resultFiles || []).map(f => typeof f === 'string' ? f : (f.fileUrl || f.url || '')).filter(Boolean),
-    resultFileUrl: task.resultFileUrl || '',
+    createdAt: isSqliteRow ? task.created_at : task.createdAt,
+    updatedAt: isSqliteRow ? task.updated_at : task.updatedAt,
+    lastSyncedAt: isSqliteRow ? task.updated_at : task.lastSyncedAt,
+    completedAt: isSqliteRow ? task.updated_at : task.completedAt,
+    resultFiles: [],
+    resultFileUrl: isSqliteRow ? task.output_url : (task.resultFileUrl || ''),
     consumeCoins: task.consumeCoins || '',
     taskCostTime: task.taskCostTime || '',
-    errorMessage: task.errorMessage || '',
-    fileName: task.uploadedFileName || '',
-    inputFilename: task.inputFilename || '',
-    sourceNodeId: task.sourceNodeId,
+    errorMessage: isSqliteRow ? task.error : (task.errorMessage || ''),
+    sourceNodeId: isSqliteRow ? task.source_node_id : task.sourceNodeId
   };
+
+  // 处理结果文件列表
+  if (isSqliteRow) {
+    if (t.resultFileUrl) t.resultFiles = [t.resultFileUrl];
+    if (task.raw_json?.resultFiles) t.resultFiles = task.raw_json.resultFiles;
+  } else {
+    t.resultFiles = (task.resultFiles || []).map(f => typeof f === 'string' ? f : (f.fileUrl || f.url || '')).filter(Boolean);
+  }
+
+  return t;
 }
 function toClientWorkflow(workflow) {
   return {
@@ -514,25 +559,37 @@ app.post('/api/runninghub/config/validate', (req, res) => {
 });
 
 app.get('/api/runninghub/tasks', (_req, res) => {
-  const db = readDb();
-  const tasks = db.tasks.slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  const tasks = sqliteStore.listTasks(200);
   res.json({ tasks: tasks.map(toClientTask) });
 });
 
 app.get('/api/runninghub/tasks/:id', async (req, res) => {
-  const db = readDb();
-  const task = db.tasks.find(item => String(item.id) === String(req.params.id));
+  const task = sqliteStore.getTask(req.params.id);
   if (!task) return res.status(404).json({ error: '任务不存在' });
+  
+  // 转换成 syncTask 期望的内存对象格式
+  const memTask = toClientTask(task);
   try {
-    await syncTask(task);
-    task.updatedAt = nowIso();
-    writeDb(db);
-    return res.json({ task: toClientTask(task) });
+    await syncTask(memTask);
+    
+    // 更新 SQLite
+    sqliteStore.updateTask(task.id, {
+      status: memTask.status,
+      output_url: memTask.resultFileUrl,
+      error: memTask.errorMessage,
+      raw_json: memTask
+    });
+    
+    return res.json({ task: memTask });
   } catch (error) {
-    task.updatedAt = nowIso();
-    task.errorMessage = error instanceof Error ? error.message : '同步任务失败';
-    writeDb(db);
-    return res.status(500).json({ error: task.errorMessage, task: toClientTask(task) });
+    const errorMsg = error instanceof Error ? error.message : '同步任务失败';
+    sqliteStore.updateTask(task.id, {
+      status: 'FAILED',
+      error: errorMsg
+    });
+    memTask.status = 'FAILED';
+    memTask.errorMessage = errorMsg;
+    return res.status(500).json({ error: errorMsg, task: memTask });
   }
 });
 
@@ -618,9 +675,7 @@ app.post('/api/runninghub/standard/text-to-image', async (req, res) => {
       updatedAt: nowIso(),
       sourceNodeId
     };
-    db.tasks.push(task);
-    writeDb(db);
-
+    sqliteStore.upsertTask(task);
     res.json({ ok: true, task: toClientTask(task) });
   } catch (err) {
     console.error('[RunningHub Standard API Error]:', err);
@@ -700,8 +755,7 @@ app.post('/api/runninghub/ai-app/text-to-image', async (req, res) => {
       updatedAt: nowIso(),
       sourceNodeId
     };
-    db.tasks.push(task);
-    writeDb(db);
+    sqliteStore.upsertTask(task);
 
     // 返回统一的任务对象，兼容旧版前端与新版诊断需求
     const clientTask = {

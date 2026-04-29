@@ -3,10 +3,11 @@
 ## 数据库路径
 `server/data/project.db`
 
-## 当前状态 (P2B 完成)
+## 当前状态 (P2C 完成)
 - **基础设施**: 已完成。`server/sqlite-store.cjs` 已实现基础 CRUD 方法。
-- **业务接入**: **尚未接入**。当前 `server/index.js` 仍在使用 JSON 存储。
-- **冒烟测试**: 已通过。支持任务、设置、工作流、KV 的独立读写。
+- **业务接入**: **Tasks 已接入**。`server/index.js` 中的任务读写已切换至 SQLite。
+- **数据迁移**: 已实现。启动时自动将旧 JSON 中的 tasks 迁移至 SQLite (幂等)。
+- **Settings/Workflows**: **尚未接入**，目前仍保留在 JSON 中。
 
 ## 表结构设计
 
