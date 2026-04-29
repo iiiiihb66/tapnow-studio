@@ -15,6 +15,11 @@ const DB_PATH = path.join(DATA_DIR, 'runninghub-db.json');
 const ENV_FILES = ['.env.local', '.env'];
 const PORT = Number(process.env.PORT || 3001);
 const RUNNINGHUB_HOST = 'https://www.runninghub.cn';
+const RUNNINGHUB_STANDARD_ENDPOINTS = {
+  'seedream-v4.5': '/openapi/v2/seedream-v4.5/text-to-image',
+  'seedream-v4': '/openapi/v2/seedream-v4/text-to-image',
+  'rhart-image-x-official': '/openapi/v2/rhart-image-x-official/text-to-image'
+};
 
 function loadEnvFiles() {
   const rootDir = path.join(__dirname, '..');
@@ -176,14 +181,69 @@ function validateRuntimePayload({ settings, imageBase64, prompt, extraFieldValue
   return errors;
 }
 async function runninghubFetch(pathname, options = {}) {
+  // 脱敏辅助函数
+  const redact = (data) => {
+    if (!data) return data;
+    try {
+      let str = typeof data === 'string' ? data : JSON.stringify(data);
+      // 脱敏 API Key 和 Token
+      str = str.replace(/Bearer [a-zA-Z0-9._-]+/g, 'Bearer [REDACTED]')
+               .replace(/"apiKey":"[^"]*"/g, '"apiKey":"[REDACTED]"');
+      if (process.env.RUNNINGHUB_API_KEY) {
+        str = str.replace(new RegExp(process.env.RUNNINGHUB_API_KEY, 'g'), '[REDACTED]');
+      }
+      // 脱敏 Prompt 内容 (针对 nodeInfoList 结构)
+      str = str.replace(/"fieldValue":"([^"]{20,})"/g, (match, p1) => `"fieldValue":"[CONTENT_REDACTED_LEN_${p1.length}]"`);
+      return typeof data === 'string' ? str : JSON.parse(str);
+    } catch (e) { return "[Redaction Error]"; }
+  };
+
   const response = await fetch(`${RUNNINGHUB_HOST}${pathname}`, options);
+  const contentType = response.headers.get('content-type') || '';
   const text = await response.text();
-  let json;
-  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
-  if (!response.ok) {
-    const message = json?.msg || json?.message || `RunningHub HTTP ${response.status}`;
-    throw new Error(message);
+  
+  let json = null;
+  if (contentType.includes('application/json')) {
+    try { json = JSON.parse(text); } catch (e) { /* fallback to null */ }
   }
+
+  if (!response.ok) {
+    const errorMsg = json?.msg || json?.message || json?.errorMessage || json?.error || 
+                    json?.data?.message || json?.data?.errorMessage || `HTTP ${response.status}`;
+    console.error(`[RunningHub HTTP Error] endpoint=${pathname}, status=${response.status}`, {
+      body: json ? redact(json) : (text.substring(0, 500) + '...')
+    });
+    throw new Error(errorMsg);
+  }
+
+  const errorCode = json?.code ?? json?.errorCode;
+  const rhStatus = json?.status;
+  
+  // 业务错误判定逻辑优化：
+  // 1. 优先检查明确的错误码字段 (code/errorCode)
+  // 2. 只有当错误码非 0、非 200 且非空时才判定为错误
+  // 3. 同时检查状态字段，若明确为 FAILED 则判定为错误
+  // 4. 字符串状态如 "RUNNING", "QUEUED" 不应被误判为错误码
+  
+  const hasErrorCode = errorCode !== undefined && errorCode !== null && String(errorCode) !== '';
+  const isCodeError = hasErrorCode && String(errorCode) !== '0' && String(errorCode) !== '200';
+  const isStatusError = rhStatus === 'FAILED';
+  
+  const isBusinessError = isCodeError || isStatusError;
+
+  if (isBusinessError) {
+    const rhCode = String(errorCode ?? rhStatus ?? 'UNKNOWN');
+    const rhMsg = json?.msg || json?.message || json?.errorMessage || json?.error || 
+                  json?.data?.message || json?.data?.errorMessage || 'RunningHub API Error';
+    
+    console.error(`[RunningHub Business Error] endpoint=${pathname}, code=${rhCode}`, {
+      status: response.status,
+      message: rhMsg,
+      body: redact(json)
+    });
+    throw new Error(rhMsg);
+  }
+
   return json;
 }
 async function uploadFileToRunningHub({ dataUrl, filename }) {
@@ -204,6 +264,16 @@ async function queryTaskStatus(taskId) {
   const apiKey = getApiKey();
   return runninghubFetch('/task/openapi/status', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ apiKey, taskId }) });
 }
+async function runAiAppTask({ webappId, nodeInfoList, instanceType = 'default', usePersonalQueue = 'false' }) {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('服务端未配置 RUNNINGHUB_API_KEY');
+  const endpoint = `/openapi/v2/run/ai-app/${webappId}`;
+  return runninghubFetch(endpoint, { 
+    method: 'POST', 
+    headers: { 'Content-Type': 'application/json', ...authHeaders() }, 
+    body: JSON.stringify({ nodeInfoList, instanceType, usePersonalQueue }) 
+  });
+}
 async function queryTaskOutputs(taskId) {
   const apiKey = getApiKey();
   return runninghubFetch('/task/openapi/outputs', { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ apiKey, taskId }) });
@@ -218,29 +288,72 @@ function normalizeRemoteStatus(value) {
 async function syncTask(localTask) {
   if (!localTask?.runninghubTaskId) return localTask;
   if (['SUCCESS', 'FAILED'].includes(localTask.status)) return localTask;
-  const statusRes = await queryTaskStatus(localTask.runninghubTaskId);
-  const remoteStatus = normalizeRemoteStatus(statusRes?.data);
-  localTask.status = remoteStatus;
-  localTask.lastSyncedAt = nowIso();
-  localTask.remoteStatusRaw = statusRes?.data || '';
-  localTask.remoteMessage = statusRes?.msg || '';
-  if (remoteStatus === 'SUCCESS') {
-    const outputRes = await queryTaskOutputs(localTask.runninghubTaskId);
-    localTask.resultFiles = outputRes?.data || [];
-    localTask.resultFileUrl = outputRes?.data?.[0]?.fileUrl || '';
-    localTask.consumeCoins = outputRes?.data?.[0]?.consumeCoins || '';
-    localTask.taskCostTime = outputRes?.data?.[0]?.taskCostTime || '';
-    localTask.completedAt = nowIso();
+
+  const isStandard = localTask.type === 'standard';
+  let statusRes;
+  
+  try {
+    if (isStandard) {
+      statusRes = await runninghubFetch('/openapi/v2/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ 
+          apiKey: getApiKey(), // V3.8.3: Add apiKey to query body
+          taskId: localTask.runninghubTaskId 
+        })
+      });
+      
+      const remoteData = statusRes?.data;
+      console.log(`[RunningHub Query] taskId=${localTask.runninghubTaskId}, status=${remoteData?.status}`);
+      const remoteStatus = normalizeRemoteStatus(remoteData?.status);
+      localTask.status = remoteStatus;
+      localTask.lastSyncedAt = nowIso();
+      localTask.remoteStatusRaw = remoteData?.status || '';
+      localTask.remoteMessage = statusRes?.msg || '';
+
+      if (remoteStatus === 'SUCCESS') {
+        const images = remoteData?.images || [];
+        localTask.resultFiles = images.map(url => ({ fileUrl: url }));
+        localTask.resultFileUrl = images[0] || '';
+        localTask.completedAt = nowIso();
+      }
+      if (remoteStatus === 'FAILED') {
+        localTask.errorMessage = statusRes?.msg || 'RunningHub 标准模型任务失败';
+        localTask.completedAt = nowIso();
+      }
+    } else {
+      statusRes = await queryTaskStatus(localTask.runninghubTaskId);
+      const remoteStatus = normalizeRemoteStatus(statusRes?.data);
+      localTask.status = remoteStatus;
+      localTask.lastSyncedAt = nowIso();
+      localTask.remoteStatusRaw = statusRes?.data || '';
+      localTask.remoteMessage = statusRes?.msg || '';
+
+      if (remoteStatus === 'SUCCESS') {
+        const outputRes = await queryTaskOutputs(localTask.runninghubTaskId);
+        localTask.resultFiles = outputRes?.data || [];
+        localTask.resultFileUrl = outputRes?.data?.[0]?.fileUrl || '';
+        localTask.consumeCoins = outputRes?.data?.[0]?.consumeCoins || '';
+        localTask.taskCostTime = outputRes?.data?.[0]?.taskCostTime || '';
+        localTask.completedAt = nowIso();
+      }
+      if (remoteStatus === 'FAILED') {
+        localTask.errorMessage = statusRes?.msg || 'RunningHub 工作流任务失败';
+        localTask.completedAt = nowIso();
+      }
+    }
+  } catch (error) {
+    console.error(`[RunningHub Sync Error] taskId=${localTask.id}:`, error);
+    // Don't mark as failed immediately on network error, let it retry
   }
-  if (remoteStatus === 'FAILED') {
-    localTask.errorMessage = statusRes?.msg || 'RunningHub 任务失败';
-    localTask.completedAt = nowIso();
-  }
+  
   return localTask;
 }
 function toClientTask(task) {
   return {
     id: task.id,
+    type: task.type || 'workflow',
+    model: task.model,
     workflowName: task.workflowName,
     workflowId: task.workflowId,
     status: task.status,
@@ -250,13 +363,14 @@ function toClientTask(task) {
     updatedAt: task.updatedAt,
     lastSyncedAt: task.lastSyncedAt,
     completedAt: task.completedAt,
-    resultFiles: task.resultFiles || [],
+    resultFiles: (task.resultFiles || []).map(f => typeof f === 'string' ? f : (f.fileUrl || f.url || '')).filter(Boolean),
     resultFileUrl: task.resultFileUrl || '',
     consumeCoins: task.consumeCoins || '',
     taskCostTime: task.taskCostTime || '',
     errorMessage: task.errorMessage || '',
     fileName: task.uploadedFileName || '',
     inputFilename: task.inputFilename || '',
+    sourceNodeId: task.sourceNodeId,
   };
 }
 function toClientWorkflow(workflow) {
@@ -433,7 +547,7 @@ app.post('/api/runninghub/tasks', async (req, res) => {
   if (validationErrors.length) {
     return res.status(400).json({ error: validationErrors[0], validationErrors });
   }
-  const { prompt = '', imageBase64, imageFilename, extraFieldValues = {} } = req.body || {};
+  const { prompt = '', imageBase64, imageFilename, extraFieldValues = {}, sourceNodeId } = req.body || {};
   const runtimeErrors = validateRuntimePayload({ settings, imageBase64, prompt, extraFieldValues });
   if (runtimeErrors.length) {
     return res.status(400).json({ error: runtimeErrors[0], runtimeErrors });
@@ -455,12 +569,151 @@ app.post('/api/runninghub/tasks', async (req, res) => {
     if (createRes?.code !== 0) throw new Error(createRes?.msg || '创建任务失败');
     const runninghubTaskId = createRes?.data?.taskId;
     if (!runninghubTaskId) throw new Error('RunningHub 未返回 taskId');
-    const task = { id: nextId(db.tasks), workflowId: String(settings.workflowId), workflowName: settings.workflowName || '未命名工作流', status: 'QUEUED', runninghubTaskId: String(runninghubTaskId), prompt: String(prompt || ''), inputFilename: imageFilename || '', uploadedFileName, nodeInfoList, settings, resultFiles: [], resultFileUrl: '', consumeCoins: '', taskCostTime: '', errorMessage: '', createdAt: nowIso(), updatedAt: nowIso(), lastSyncedAt: '', completedAt: '' };
+    const task = { id: nextId(db.tasks), type: 'workflow', workflowId: String(settings.workflowId), workflowName: settings.workflowName || '未命名工作流', status: 'QUEUED', runninghubTaskId: String(runninghubTaskId), prompt: String(prompt || ''), inputFilename: imageFilename || '', uploadedFileName, nodeInfoList, settings, resultFiles: [], resultFileUrl: '', consumeCoins: '', taskCostTime: '', errorMessage: '', createdAt: nowIso(), updatedAt: nowIso(), lastSyncedAt: '', completedAt: '', sourceNodeId };
     db.tasks.push(task);
     writeDb(db);
     return res.json({ ok: true, task: toClientTask(task) });
   } catch (error) {
     return res.status(500).json({ error: humanizeRunningHubError(error, settings) });
+  }
+});
+
+app.post('/api/runninghub/standard/text-to-image', async (req, res) => {
+  const apiKey = getApiKey();
+  if (!apiKey) return res.status(400).json({ error: '服务端未配置 RUNNINGHUB_API_KEY' });
+
+  const { prompt, model = 'seedream-v4.5', width = 1024, height = 1024, sourceNodeId } = req.body || {};
+  if (!prompt || !String(prompt).trim()) return res.status(400).json({ error: '提示词不能为空' });
+
+  const endpoint = RUNNINGHUB_STANDARD_ENDPOINTS[model] || RUNNINGHUB_STANDARD_ENDPOINTS['seedream-v4.5'];
+  const actualModel = RUNNINGHUB_STANDARD_ENDPOINTS[model] ? model : 'seedream-v4.5';
+
+  try {
+    const rhRes = await runninghubFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({
+        apiKey,
+        prompt: prompt.trim(),
+        width: Number(width),
+        height: Number(height),
+        maxImages: 1
+      })
+    });
+    console.log(`[RunningHub Response] status=${rhRes.code || rhRes.errorCode}, msg=${rhRes.msg || rhRes.errorMessage}`);
+
+    const runninghubTaskId = rhRes.data?.taskId;
+    if (!runninghubTaskId) throw new Error('RunningHub 未返回 taskId');
+
+    const db = readDb();
+    const task = {
+      id: nextId(db.tasks),
+      type: 'standard',
+      model: actualModel,
+      workflowName: `RunningHub ${actualModel}`,
+      status: 'QUEUED',
+      runninghubTaskId: String(runninghubTaskId),
+      prompt: String(prompt).trim(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      sourceNodeId
+    };
+    db.tasks.push(task);
+    writeDb(db);
+
+    res.json({ ok: true, task: toClientTask(task) });
+  } catch (err) {
+    console.error('[RunningHub Standard API Error]:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/runninghub/ai-app/text-to-image', async (req, res) => {
+  const apiKey = getApiKey();
+  const webappId = process.env.RUNNINGHUB_IMAGE_WEBAPP_ID || '2016796569449795585';
+  
+  // 配置读取 (带默认值)
+  const promptNodeId = process.env.RUNNINGHUB_AIAPP_PROMPT_NODE_ID || '50';
+  const promptFieldName = process.env.RUNNINGHUB_AIAPP_PROMPT_FIELD_NAME || 'text';
+  const ratioNodeId = process.env.RUNNINGHUB_AIAPP_RATIO_NODE_ID || '41';
+  const ratioFieldName = process.env.RUNNINGHUB_AIAPP_RATIO_FIELD_NAME || 'select';
+  const ratioFieldValue = process.env.RUNNINGHUB_AIAPP_RATIO_FIELD_VALUE || '7';
+  const instanceType = process.env.RUNNINGHUB_AIAPP_INSTANCE_TYPE || 'default';
+  const usePersonalQueue = process.env.RUNNINGHUB_AIAPP_USE_PERSONAL_QUEUE || 'false';
+
+  if (!apiKey) return res.status(400).json({ error: '服务端未配置 RUNNINGHUB_API_KEY' });
+  if (!webappId) return res.status(400).json({ error: '请在 .env 配置 RUNNINGHUB_IMAGE_WEBAPP_ID' });
+
+  const { prompt, sourceNodeId } = req.body || {};
+  if (!prompt || !String(prompt).trim()) return res.status(400).json({ error: '提示词不能为空' });
+
+  try {
+    const nodeInfoList = [
+      {
+        nodeId: String(ratioNodeId),
+        fieldName: String(ratioFieldName),
+        fieldValue: String(ratioFieldValue),
+        description: "设置比例"
+      },
+      {
+        nodeId: String(promptNodeId),
+        fieldName: String(promptFieldName),
+        fieldValue: String(prompt).trim(),
+        description: "输入文本"
+      }
+    ];
+
+    const redactedNodeInfo = nodeInfoList.map(n => ({ 
+      nodeId: n.nodeId, 
+      fieldName: n.fieldName, 
+      description: n.description,
+      valueLength: String(n.fieldValue || '').length 
+    }));
+    
+    console.log(`[RunningHub AI-App Request] webappId=${webappId}, nodes=`, redactedNodeInfo, {
+      instanceType,
+      usePersonalQueue,
+      promptLength: String(prompt || '').length
+    });
+    
+    const rhRes = await runAiAppTask({ webappId, nodeInfoList, instanceType, usePersonalQueue });
+
+    // 兼容多种 taskId 返回格式 (根节点或 data.taskId)
+    const runninghubTaskId = rhRes.taskId || rhRes.data?.taskId;
+    
+    if (!runninghubTaskId) {
+      console.error('[RunningHub AI-App Error Response]:', redact(rhRes));
+      throw new Error('RunningHub 未返回 taskId');
+    }
+
+    console.log(`[RunningHub AI-App Success] taskId=${runninghubTaskId}`);
+
+    const db = readDb();
+    const task = {
+      id: nextId(db.tasks),
+      type: 'ai-app',
+      workflowName: `RunningHub AI App`,
+      status: 'QUEUED',
+      runninghubTaskId: String(runninghubTaskId),
+      prompt: String(prompt).trim(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      sourceNodeId
+    };
+    db.tasks.push(task);
+    writeDb(db);
+
+    // 返回统一的任务对象，兼容旧版前端与新版诊断需求
+    const clientTask = {
+      ...toClientTask(task),
+      taskId: task.id,
+      remoteTaskId: runninghubTaskId,
+      runningHubTaskId: runninghubTaskId
+    };
+    res.json({ ok: true, task: clientTask });
+  } catch (err) {
+    console.error('[RunningHub AI-App Error]:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 

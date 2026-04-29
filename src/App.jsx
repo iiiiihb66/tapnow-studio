@@ -1815,7 +1815,7 @@ const DEFAULT_PROVIDERS = {
     'midjourney': { key: '', url: 'https://api.midjourney.com', apiType: 'openai', useProxy: false, forceAsync: false },
     'jimeng': { key: '', url: JIMENG_API_BASE_URL, apiType: 'openai', useProxy: false, forceAsync: false },
     'grok': { key: '', url: 'https://ai.t8star.cn', apiType: 'openai', useProxy: false, forceAsync: false },
-    'runninghub': { key: '', url: 'http://localhost:3001', apiType: 'runninghub', useProxy: false, forceAsync: true },
+    'runninghub': { key: 'BACKEND_MANAGED', url: 'http://localhost:3001', apiType: 'runninghub', useProxy: false, forceAsync: true },
 };
 
 // V3.6.0: 模型配置（简化版 - id 即 modelName，无 displayName）
@@ -1828,7 +1828,7 @@ const DEFAULT_API_CONFIGS = [
     { id: 'gemini-3-pro-preview', provider: 'google', type: 'Chat' },
 
     // Image Models
-    { id: 'runninghub-image', provider: 'runninghub', type: 'Image' },
+    { id: 'runninghub-image', provider: 'runninghub', type: 'Image', displayName: 'RunningHub AI App' },
     { id: 'MJ V6', provider: 'midjourney', type: 'Image' },
     { id: 'gpt-4o-image', provider: 'openai', type: 'Image' },
     { id: 'gemini-3-pro-image-preview', provider: 'yunwu', type: 'Image' },
@@ -5609,6 +5609,15 @@ function TapnowApp() {
                     }
                 });
 
+                // V3.8.3: 确保 RunningHub 模型存在 (P1 验收修复)
+                const rhModels = DEFAULT_API_CONFIGS.filter(m => m.provider === 'runninghub');
+                rhModels.forEach(m => {
+                    if (!existingIds.has(m.id)) {
+                        configs.push(m);
+                        existingIds.add(m.id);
+                    }
+                });
+
                 // V3.8.2: Ensure every config has a unique internal ID for UI rendering stability
                 // This prevents input focus loss when editing the ID
                 configs = configs.map(c => c._uid ? c : { ...c, _uid: `uid-${Date.now()}-${Math.random().toString(36).substr(2, 9)}` });
@@ -5630,6 +5639,10 @@ function TapnowApp() {
             const saved = localStorage.getItem('tapnow_providers');
             if (saved) {
                 const parsed = JSON.parse(saved);
+                // V3.8.3: 强制补充 RunningHub (P1 验收修复)
+                if (!parsed['runninghub']) {
+                    parsed['runninghub'] = DEFAULT_PROVIDERS['runninghub'];
+                }
                 // 直接使用用户保存的数据，不再自动补充默认Provider
                 // 如果用户删除了一个Provider，它就不会再出现
                 return Object.fromEntries(Object.entries(parsed).map(([key, config]) => [key, normalizeProviderConfig(key, config)]));
@@ -16027,7 +16040,7 @@ function TapnowApp() {
                 if (task.status === 'SUCCESS' && task.resultFiles && task.resultFiles.length > 0) {
                     const finalUrl = task.resultFiles[0];
                     setHistory((prev) => prev.map((hItem) => hItem.id === taskId ? { ...hItem, status: 'success', progress: 100, url: finalUrl, width: w, height: h } : hItem));
-                    handleTaskSuccess(taskId, finalUrl, w, h, sourceNodeId);
+                    updatePreviewFromTask(taskId, finalUrl, 'image', sourceNodeId);
                 } else if (task.status === 'FAILED') {
                     setHistory((prev) => prev.map((hItem) => hItem.id === taskId ? { ...hItem, status: 'failed', progress: 0, errorMsg: task.errorMessage || '生成失败' } : hItem));
                 } else {
@@ -17390,25 +17403,14 @@ function TapnowApp() {
                         };
                     }
                 }
-                // 6.5 RunningHub API Integration
+                // 6.5 RunningHub API Integration (AI App Mode)
                 else if (providerLower === 'runninghub') {
-                    endpoint = `${baseUrl}/api/runninghub/tasks`;
-                    if (endpoint.startsWith('http://localhost:3001')) {
-                        endpoint = endpoint.replace('http://localhost:3001', '');
-                    }
+                    endpoint = `/api/runninghub/ai-app/text-to-image`;
+                    
                     payload = {
-                        prompt: prompt || ''
+                        prompt: prompt || '',
+                        sourceNodeId: nodeId
                     };
-                    if (connectedImages.length > 0) {
-                        try {
-                            const imgUrl = connectedImages[0];
-                            const base64 = await getBase64FromUrl(imgUrl, { useProxy: resolveSourceProxy(imgUrl) });
-                            payload.imageBase64 = `data:image/png;base64,${base64}`;
-                            payload.imageFilename = 'input.png';
-                        } catch (e) {
-                            throw new Error(`图片加载失败: ${e.message}`);
-                        }
-                    }
                 }
                 // 7. [修复] 通用兜底 (修复 Banana T2I 问题)
                 // 这部分是 V2.5-4 缺失的，导致普通 Banana 模型和其他通用 OpenAI 格式模型无法进行文生图
@@ -17870,11 +17872,12 @@ function TapnowApp() {
 
                 const immediateImageCandidates = collectImmediateImageUrls(data);
 
-                if (providerLower === 'runninghub' && data?.task?.id) {
+                const rhTaskId = data?.task?.id || data?.taskId || data?.remoteTaskId || data?.runningHubTaskId || data?.data?.taskId;
+                if (providerLower === 'runninghub' && rhTaskId) {
                     setHistory((prev) => prev.map((hItem) =>
-                        hItem.id === taskId ? { ...hItem, status: 'generating', progress: 10, remoteTaskId: data.task.id } : hItem
+                        hItem.id === taskId ? { ...hItem, status: 'generating', progress: 10, remoteTaskId: rhTaskId } : hItem
                     ));
-                    pollRunningHubTask(taskId, data.task.id, baseUrl, w, h, actualSourceNodeId, 0);
+                    pollRunningHubTask(taskId, rhTaskId, baseUrl, w, h, actualSourceNodeId, 0);
                     return;
                 }
 
@@ -35270,6 +35273,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 if (item.apiConfig) {
                                                                     setHistory(prev => prev.map(h => h.id === item.id ? { ...h, status: 'generating', errorMsg: null, progress: 5 } : h));
                                                                     if (item.modelName.includes('veo')) pollVeoJob(item.remoteTaskId, item.id, item.apiConfig.baseUrl, item.apiConfig.apiKey, item.width, item.height);
+                                                                    else if (item.provider === 'runninghub' || (item.apiConfig?.provider || '').toLowerCase() === 'runninghub') {
+                                                                        pollRunningHubTask(item.id, item.remoteTaskId, item.apiConfig.baseUrl, item.width, item.height, item.sourceNodeId);
+                                                                    }
                                                                     else pollSoraJob(item.remoteTaskId, item.id, item.apiConfig.baseUrl, item.apiConfig.apiKey, item.width, item.height, item.apiConfig.modelId || '');
                                                                 }
                                                             }}
@@ -35367,6 +35373,9 @@ ${inputText.substring(0, 15000)} ... (截断)
                                                                 if (item.apiConfig) {
                                                                     setHistory(prev => prev.map(h => h.id === item.id ? { ...h, status: 'generating', errorMsg: null, progress: 5 } : h));
                                                                     if (item.modelName.includes('veo')) pollVeoJob(item.remoteTaskId, item.id, item.apiConfig.baseUrl, item.apiConfig.apiKey, item.width, item.height);
+                                                                    else if (item.provider === 'runninghub' || (item.apiConfig?.provider || '').toLowerCase() === 'runninghub') {
+                                                                        pollRunningHubTask(item.id, item.remoteTaskId, item.apiConfig.baseUrl, item.width, item.height, item.sourceNodeId);
+                                                                    }
                                                                     else pollSoraJob(item.remoteTaskId, item.id, item.apiConfig.baseUrl, item.apiConfig.apiKey, item.width, item.height, item.apiConfig.modelId || '');
                                                                 }
                                                             }}

@@ -42,3 +42,9 @@ src_corrupted_*/
 .env.*
 server.log
 server.pid
+
+# Persistence Data (P0 Protection)
+data/
+server/data/
+*.db
+yjs-docs/
